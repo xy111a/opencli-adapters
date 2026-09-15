@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+.AppleDouble
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Local overrides / secrets
+*.local.js
+.env
+.env.*
+
+# OpenCLI profiles (NEVER commit — contains login sessions/cookies)
+.opencli/
+profiles/
+
+# Editor
+.vscode/
+.idea/
+*.swp
