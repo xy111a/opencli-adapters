@@ -21,10 +21,25 @@ async function hasLiepinSessionCookie(page) {
   return SESSION_COOKIE_CANDIDATES.some((n) => names.has(n));
 }
 
+// Well-known UI strings that are NOT the account name. The header on
+// liepin.com contains CTAs like "邀请应聘" / "我要招人" that some loose
+// selectors would otherwise match before the real username span renders.
+const NON_USERNAME_TOKENS = ['邀请应聘', '我要招人', '你好', '登录', '注册', '立即登录', '免费', '顾问', '猎头', '简历优化'];
+
+function isPlausibleName(text) {
+  const t = (text || '').trim();
+  if (!t || t.length > 12) return false;
+  if (!/[一-龥]/.test(t) && !/[A-Za-z]/.test(t)) return false;
+  return !NON_USERNAME_TOKENS.some((d) => t.includes(d));
+}
+
 async function verifyLiepinIdentity(page) {
   await page.goto(LIEPIN_USER_CENTER);
-  // The header username is client-rendered — poll for it (or a login redirect).
-  const deadline = Date.now() + 6000;
+  // The header username (`.header-quick-menu-username`, a stable class with no
+  // hash suffix) is client-rendered AFTER the SPA hydrates. Poll for it, but
+  // ONLY accept the verified username span or the "你好，<name>" body pattern —
+  // never the loose selectors that would grab a job-card CTA like "邀请应聘".
+  const deadline = Date.now() + 8000;
   let name = '';
   while (Date.now() < deadline) {
     const probe = await page.evaluate(`
@@ -33,25 +48,18 @@ async function verifyLiepinIdentity(page) {
         if (/\\/login/.test(href) || /\\/passport\\//.test(href) || /\\/user\\/login/.test(href)) {
           return { kind: 'auth', detail: 'Liepin redirected to login: ' + href };
         }
-        const selectors = [
-          '.header-quick-menu-username', '.user-info .name', '.header .username',
-          '[class*="user-name"]', '.uname', '.nickname', '[class*="nick"]',
-          '.user-name', 'a[href*="/u/"] .name', '.top-user .name', '[data-nick="user-name"]',
-        ];
-        let n = '';
-        for (const s of selectors) {
-          const el = document.querySelector(s);
-          if (el && el.textContent && el.textContent.trim()) { n = el.textContent.trim(); break; }
-        }
-        if (!n) {
-          const g = (document.body.innerText || '').match(/你好[，,\\s]*([^\\n,，]{1,20})/);
-          if (g) n = g[1].trim();
-        }
-        return { ok: true, name: n };
+        // 1) Preferred: the stable header username span (no hash suffix).
+        const span = document.querySelector('.header-quick-menu-username');
+        const preferred = span && span.textContent ? span.textContent.trim() : '';
+        if (preferred) return { ok: true, name: preferred };
+        // 2) Fallback: body text "你好，<name>" pattern.
+        const g = (document.body.innerText || '').match(/你好[，,\\s]+([^\\n,，\\s]{1,12})/);
+        if (g && g[1]) return { ok: true, name: g[1].trim() };
+        return { ok: true, name: '' };
       })()
     `);
     if (probe?.kind === 'auth') throw new AuthRequiredError('liepin.com', probe.detail);
-    if (probe?.name) { name = probe.name; break; }
+    if (probe?.name && isPlausibleName(probe.name)) { name = probe.name; break; }
     await page.wait(1);
   }
   return { name };
