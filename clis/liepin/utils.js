@@ -43,13 +43,24 @@ export const EXTRACT_JOB_CARDS_JS = `
     for (const card of cards) {
       const link = card.querySelector('a[data-nick="job-detail-job-info"]');
       const href = link ? (link.getAttribute('href') || '') : '';
-      const m = href && href.match(/\\/job\\/(\\d+)\\.shtml/);
+      // 猎聘详情 URL 有两种格式：旧版 /job/<id>.shtml 与推荐流新版 /a/<id>.shtml。
+      // 只匹配 /job/ 会导致 /a/ 卡片提取不到 job_id，进而被去重守卫整条丢弃。
+      const m = href && href.match(/\\/(?:job|a)\\/(\\d+)\\.shtml/);
       const jobId = m ? m[1] : '';
       const titleDiv = link ? link.querySelector('div.ellipsis-1') : null;
       const title = titleDiv ? (titleDiv.textContent || '').trim() : '';
       const text = (card.innerText || '').replace(/\\s+/g, ' ');
-      const locM = text.match(/【([^】]+)】/);
-      const location = locM ? locM[1].trim() : '';
+      // 位置优先从专门的「【城市】」包裹元素取：该 div 的 textContent 恰好是【x】，
+      // 可避免误命中标题里自带的【…】（如「【流水百亿+】海外GTM负责人」）。
+      // 找不到时回退到正文中符合地理形态的【…】。
+      let location = '';
+      const locWrap = Array.from(card.querySelectorAll('div')).find(d => /^【[^】]+】$/.test((d.textContent || '').trim()));
+      if (locWrap) {
+        location = (locWrap.textContent || '').trim().replace(/【|】/g, '').trim();
+      } else {
+        const locM = text.match(/【([^】]*(?:市|区|县|省|镇|街道|深圳|北京|上海|广州|杭州|成都|武汉|南京|苏州|西安|重庆|长沙|郑州|青岛|厦门|天津|合肥|宁波)[^】]*)】/);
+        if (locM) location = locM[1].trim();
+      }
       const salM = text.match(/(\\d+(?:\\.\\d+)?(?:-\\d+(?:\\.\\d+)?)?k)/i);
       const salary = salM ? salM[1] : '';
       const expM = text.match(/(\\d+-\\d+年|\\d+年以上|\\d+年以内|经验不限|应届|在校)/);

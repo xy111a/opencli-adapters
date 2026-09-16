@@ -86,13 +86,16 @@ cli({
       if (!Array.isArray(batch) || batch.length === 0) break;
       let added = 0;
       for (const j of batch) {
-        if (!j.job_id || seen.has(j.job_id)) continue;
+        // 去重键：优先用 job_id；提取不到时退回「标题|公司|城市|薪资」复合键，
+        // 绝不因缺 job_id 而丢弃有效岗位（猎聘 /a/ 短链曾导致 job_id 大面积为空）。
+        const dedupKey = j.job_id || `${j.title}|${j.company}|${j.location}|${j.salary}`;
+        if (seen.has(dedupKey)) continue;
         // 指定城市时，只保留 location 命中该城市的岗位（猎聘深翻页会回落全国推荐流）
         if (city && j.location && !j.location.includes(city)) {
           verbose(`[liepin][city-filter] DROP ${city} not in location="${j.location}" | ${j.company} · ${j.title}`);
           continue;
         }
-        seen.add(j.job_id);
+        seen.add(dedupKey);
         all.push(j);
         added++;
         if (all.length >= limit) break;
