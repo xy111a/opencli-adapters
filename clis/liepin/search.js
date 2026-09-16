@@ -63,7 +63,9 @@ cli({
     let curPage = readPositiveInteger(kwargs.page, 'page', 1);
     const all = [];
     const seen = new Set();
-    while (all.length < limit) {
+    let emptyPages = 0;
+    const MAX_PAGES = 12;
+    while (all.length < limit && curPage <= MAX_PAGES) {
       const qs = new URLSearchParams();
       if (query) qs.set('key', query);
       const cityParam = resolveCityParam(city);
@@ -86,13 +88,21 @@ cli({
       for (const j of batch) {
         if (!j.job_id || seen.has(j.job_id)) continue;
         // 指定城市时，只保留 location 命中该城市的岗位（猎聘深翻页会回落全国推荐流）
-        if (city && j.location && !j.location.includes(city)) continue;
+        if (city && j.location && !j.location.includes(city)) {
+          verbose(`[liepin][city-filter] DROP ${city} not in location="${j.location}" | ${j.company} · ${j.title}`);
+          continue;
+        }
         seen.add(j.job_id);
         all.push(j);
         added++;
         if (all.length >= limit) break;
       }
-      if (added === 0) break; // duplicate page, stop
+      if (added === 0) {
+        emptyPages++;
+        if (emptyPages >= 3) break; // 连续 3 页无本城市匹配才放弃（猎聘深翻页会回落全国噪声流）
+      } else {
+        emptyPages = 0;
+      }
       curPage++;
     }
     if (all.length === 0) {
