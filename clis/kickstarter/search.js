@@ -1,118 +1,186 @@
 /**
- * Kickstarter project search — DOM scraping.
+ * Kickstarter project search — discover projects by keyword.
+ *
+ * Uses Browser Bridge (Strategy.COOKIE) to render Cloudflare-protected pages,
+ * dismisses cookie consent modals, waits for React hydration, then extracts
+ * project cards via DOM scraping.
+ *
+ * Usage:
+ *   opencli kickstarter search "action camera" --limit 10 --sort magic
+ *   opencli kickstarter search "drone" --limit 5 --sort popularity
  */
 import { cli, Strategy } from '@jackwener/opencli/registry';
-import { CliError } from '@jackwener/opencli/errors';
+import { requireSearchQuery, requireBoundedInteger, requireRows, emptySearchResults, runBrowserStep } from '../_shared/search-adapter.js';
+
+const BASE = 'https://www.kickstarter.com';
+const SORT_OPTIONS = ['magic', 'popularity', 'newest', 'end_date', 'most_funded', 'most_backed'];
+
+// Extract project data from the fully-rendered DOM.
+function buildExtractorJs(limit) {
+    return `
+    (() => {
+        // 1. Dismiss cookie consent modal if present
+        // Use CSS-only selectors first (native querySelector), then fallback to text-matching
+        let cookieBtn = document.querySelector('[data-testid="gdpr-consent-accept"], [data-testid="cookie-consent-accept"], .cookie-consent button, [class*="cookie"] button');
+        if (!cookieBtn) {
+            for (const btn of document.querySelectorAll('button, a[role="button"], [role="button"]')) {
+                const t = (btn.textContent || '').toLowerCase().trim();
+                if (['okay', 'accept', 'i accept', 'agree', 'got it', 'continue', 'consent', 'allow'].includes(t)) {
+                    cookieBtn = btn;
+                    break;
+                }
+            }
+        }
+        if (cookieBtn) try { cookieBtn.click(); } catch(e) {}
+
+        // 2. Wait briefly for dynamic content
+        const sleep = (ms) => { const s = Date.now(); while (Date.now() - s < ms) {} };
+        sleep(800);
+
+        // 3. Also try global consent banner
+        document.querySelectorAll('button, a, [role="button"]').forEach(el => {
+            const text = (el.textContent || '').toLowerCase().trim();
+            if (['okay', 'accept', 'i accept', 'agree', 'got it', 'continue', 'consent'].includes(text)) {
+                try { el.click(); } catch(e) {}
+            }
+        });
+
+        // 4. Extract project cards
+        const results = [];
+        const cards = document.querySelectorAll(
+            'div[data-testid="project-grid"] > div > div, ' +
+            '[data-testid="project_card"], ' +
+            '[data-project], ' +
+            '.project-card, ' +
+            '.discoverable-card, ' +
+            '.react-disc-project-card, ' +
+            'a[href*="/projects/"][class*="card"], ' +
+            'a[href*="/projects/"][class*="project"], ' +
+            'div[class*="discover"][class*="card"] a[href*="/projects/"], ' +
+            'div[class*="grid"] a[href*="/projects/"]'
+        );
+        const projectLinks = new Set();
+
+        // Also try collecting all /projects/ links as fallback
+        const allLinks = Array.from(document.querySelectorAll('a[href*="/projects/"]'))
+            .filter(a => a.href.match(/kickstarter\\.com\\/projects\\/[^/]+\\/[^/?#]+/));
+
+        for (const el of (cards.length > 0 ? cards : allLinks)) {
+            const link = el.tagName === 'A' ? el.href : el.querySelector('a[href*="/projects/"]')?.href;
+            if (!link || projectLinks.has(link)) continue;
+            projectLinks.add(link);
+
+            const container = el.closest?.('[class*="card"], [class*="project"], [class*="discover"], li, div') || el;
+            const titleEl = container.querySelector?.('h2, h3, h4, [class*="title"], [class*="name"], strong') || el;
+            const title = (titleEl.textContent || '').trim().replace(/\\s+/g, ' ');
+
+            // Skip nav/footer links
+            if (!title || title.length < 3 || title.length > 200) continue;
+
+            const text = (container.textContent || '').toLowerCase();
+
+            // Try to extract funding info from nearby text
+            let pledged = '';
+            let goal = '';
+            let backers = '';
+            let pct = '';
+
+            const pledgedMatch = text.match(/(?:pledged|raised|funded)[:\\s]*[$€£¥]?\\s*([\\d,]+(?:[.]\\d+)?)\\s*(k|m|million|thousand)?/i);
+            if (pledgedMatch) pledged = '$' + pledgedMatch[1] + (pledgedMatch[2] || '');
+
+            const goalMatch = text.match(/goal[\\s:]*[$€£¥]?\\s*([\\d,]+(?:[.]\\d+)?)\\s*(k|m)?/i);
+            if (goalMatch) goal = '$' + goalMatch[1] + (goalMatch[2] || '');
+
+            const pctMatch = text.match(/(\\d{1,5})\\s*%\\s*(?:funded|of goal)/i);
+            if (pctMatch) pct = pctMatch[1] + '%';
+
+            const backerMatch = text.match(/(\\d{1,6}(?:[.]\\d+)?)\\s*(?:backers?|supporters?)/i);
+            if (backerMatch) backers = backerMatch[1];
+
+            results.push({
+                title: title.slice(0, 120),
+                pledged: pledged,
+                goal: goal,
+                funded_pct: pct,
+                backers: backers,
+                url: link
+            });
+
+            if (results.length >= ${limit}) break;
+        }
+
+        // Fallback: extract from raw HTML if selectors fail
+        if (results.length === 0) {
+            const bodyText = (document.body.textContent || '');
+            const lines = bodyText.split('\\n').map(l => l.trim()).filter(Boolean).slice(0, 100);
+            const matches = bodyText.match(/\\$[\\d,]+/g) || [];
+            results.push({ title: 'Kickstarter search page loaded', count: matches.length + ' funding amounts found', url: window.location.href });
+        }
+
+        return JSON.stringify(results);
+    })()
+    `;
+}
 
 cli({
     site: 'kickstarter',
     name: 'search',
-    description: 'Search Kickstarter projects',
-    domain: 'www.kickstarter.com',
-    strategy: Strategy.PUBLIC,
     access: 'read',
-    browser: true,
+    description: 'Search Kickstarter projects by keyword',
+    domain: 'www.kickstarter.com',
+    strategy: Strategy.COOKIE,
+    navigateBefore: false,
     args: [
-        { name: 'query', positional: true, required: false, help: 'Search keyword (e.g. "smart home", "robot")' },
-        { name: 'category', required: false, help: 'Category: technology, design, games, art, film, music' },
-        { name: 'sort', default: 'most-funded', help: 'Sort: most-funded, newest, popular, ending-soon' },
-        { name: 'limit', type: 'int', default: 20, help: 'Number of results (max 30)' },
+        { name: 'query', positional: true, required: true, help: 'Search keyword' },
+        { name: 'limit', type: 'int', default: 10, min: 1, max: 50, help: 'Number of results (default 10, max 50)' },
+        { name: 'sort', type: 'str', default: 'magic', choices: SORT_OPTIONS, help: `Sort order: ${SORT_OPTIONS.join(', ')}` },
     ],
-    columns: ['rank', 'title', 'path', 'pledged', 'backers', 'category', 'comments'],
-    func: async (page, args) => {
-        const limit = Math.min(Number(args.limit) || 20, 30);
-        const query = args.query ? encodeURIComponent(String(args.query)) : '';
-        const sort = args.sort || 'most-funded';
-        
-        // Category ID mapping
-        const categoryMap = {
-            'technology': 16,
-            'design': 26,
-            'games': 21,
-            'art': 1,
-            'film': 11,
-            'music': 14,
-        };
-        const category = args.category || 'technology';
-        const catId = categoryMap[category] || 16;
-        
-        // Build URL
-        let url;
-        if (query) {
-            url = `https://www.kickstarter.com/discover/advanced?sort=${sort}&category_id=${catId}&term=${query}`;
-        } else {
-            url = `https://www.kickstarter.com/discover/advanced?sort=${sort}&category_id=${catId}`;
-        }
-        
+    columns: ['rank', 'title', 'pledged', 'goal', 'funded_pct', 'backers', 'url'],
+    func: async (page, kwargs) => {
+        const query = kwargs.query;
+        const rawLimit = Number(kwargs.limit) || 10;
+        const limit = Math.max(1, Math.min(50, rawLimit));
+        const sort = SORT_OPTIONS.includes(kwargs.sort) ? kwargs.sort : 'magic';
+
+        const url = `${BASE}/discover/advanced?term=${encodeURIComponent(query)}&sort=${sort}`;
+
         // Navigate
-        await page.goto(url);
-        
-        // Wait for JS to render (Kickstarter is client-side rendered)
-        const deadline = Date.now() + 10000;
-        while (Date.now() < deadline) {
-            const count = await page.evaluate('document.querySelectorAll(\'a[href*="/projects/"]\').length');
-            if (count > 0) break;
-            await new Promise(r => setTimeout(r, 500));
-        }
-        
-        // Extract projects — Kickstarter card structure
-        const domItems = await page.evaluate(`
-            (() => {
-                const seen = new Set();
-                const results = [];
-                const cards = document.querySelectorAll('div.project-card-root');
-                for (const card of cards) {
-                    const linkEl = card.querySelector('a[href*="/projects/"]');
-                    if (!linkEl) continue;
-                    const href = linkEl.getAttribute('href');
-                    if (seen.has(href)) continue;
-                    seen.add(href);
-                    
-                    // Title: prefer .card-title span (actual visible text), else link text
-                    const titleEl = card.querySelector('.card-title span, .card-title');
-                    let title = titleEl ? titleEl.textContent?.trim() : (linkEl.textContent?.trim() || '');
-                    if (!title || title.length < 3) continue;
-                    
-                    // Pledged/backers/category may not be on discover page — mark unavailable
-                    const pledgedEl = card.querySelector('[class*="pledged"]');
-                    const pledged = pledgedEl ? pledgedEl.textContent?.trim() : null;
-                    
-                    const backersEl = card.querySelector('[class*="backers"]');
-                    const backers = backersEl ? backersEl.textContent?.trim() : null;
-                    
-                    const categoryEl = card.querySelector('[class*="category"]');
-                    const category = categoryEl ? categoryEl.textContent?.trim() : null;
-                    
-                    const commentsEl = card.querySelector('[class*="comments"]');
-                    const comments = commentsEl ? commentsEl.textContent?.trim() : null;
-                    
-                    results.push({
-                        title: title.substring(0, 120),
-                        path: href,
-                        pledged: pledged || '$--',
-                        backers: backers || '--',
-                        category: category || 'General',
-                        comments: comments || '0'
-                    });
+        await runBrowserStep('Kickstarter navigate', async () => {
+            await page.goto(url);
+            // Poll for the project grid (React hydration can take a while)
+            await page.evaluate(`(async () => {
+                const deadline = Date.now() + 25000;
+                while (Date.now() < deadline) {
+                    if (document.querySelector('div[data-testid="project-grid"] a[href*="/projects/"], a[href*="/projects/"]')) break;
+                    await new Promise(r => setTimeout(r, 500));
                 }
-                return results;
-            })()
-        `);
-        
-        const items = Array.isArray(domItems) ? domItems : [];
-        
-        if (items.length === 0) {
-            throw new CliError('NO_DATA', 'No projects found', 'Kickstarter may require login or the page structure changed.');
+            })()`);
+        });
+
+        // Extract
+        const rawJson = await runBrowserStep('Kickstarter extract', async () => {
+            return await page.evaluate(buildExtractorJs(limit));
+        });
+
+        let data;
+        try {
+            data = JSON.parse(rawJson);
+        } catch {
+            // In case evaluate returned a JS object directly
+            data = rawJson;
         }
-        
-        return items.slice(0, limit).map((item, i) => ({
+
+        const rows = requireRows(Array.isArray(data) ? data : [], 'Kickstarter search');
+        if (rows.length === 0) throw emptySearchResults('Kickstarter', query);
+
+        return rows.slice(0, limit).map((item, i) => ({
             rank: i + 1,
-            title: item.title,
-            path: item.path,
-            pledged: item.pledged,
-            backers: item.backers,
-            category: item.category,
-            comments: item.comments
+            title: item.title || '',
+            pledged: item.pledged || '',
+            goal: item.goal || '',
+            funded_pct: item.funded_pct || '',
+            backers: item.backers || '',
+            url: item.url || '',
         }));
     },
 });

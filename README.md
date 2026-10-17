@@ -9,7 +9,7 @@
 | 站点 | 目录 | 命令 | 说明 |
 |---|---|---|---|
 | 猎聘 Liepin | `clis/liepin` | `login` / `whoami` / `cookies` / `explore` / `search` / `recommend` | 招聘职位搜索 + 个性化推荐流（DOM 提取，登录后数据更完整） |
-| Indiegogo | `clis/indiegogo` | `search` | 众筹项目搜索与发现 |
+| Indiegogo | `clis/indiegogo` | `search` | 众筹项目搜索（直调站内搜索 API，无需等页面水合） |
 | Kickstarter | `clis/kickstarter` | `hot` / `search` | 热门项目 + 项目搜索 |
 | Kicktraq | `clis/kicktraq` | `search` | Kickstarter 项目数据分析与追踪 |
 | Google Patents | `clis/patents` | `search` | 按关键词检索专利 |
@@ -29,6 +29,17 @@ cp -R clis/liepin ~/.opencli/clis/
 # 猎聘依赖 clis/_shared/site-auth.js，装 liepin 时要把 _shared 一起复制
 cp -R clis/_shared ~/.opencli/clis/_shared
 ```
+
+> **2.x 注意**：indiegogo / kickstarter / patents 引用了 opencli 包内置的
+> `../_shared/search-adapter.js`（2.0.0+ 才有）。本仓库不持有该文件，
+> 新机器上需先链过去（二选一）：
+> ```bash
+> # 推荐：整个 _shared 链到 npm 包（包内同样带有 site-auth.js，不会破坏 liepin）
+> ln -s "$(npm root -g)/@jackwener/opencli/clis/_shared" ~/.opencli/clis/_shared
+> # 或只复制 search-adapter.js 到已有的 ~/.opencli/clis/_shared/
+> cp "$(npm root -g)/@jackwener/opencli/clis/_shared/search-adapter.js" ~/.opencli/clis/_shared/
+> ```
+> 缺了它 `opencli doctor` 会报 `Failed to load module ... _shared/search-adapter.js`。
 
 装完验证：
 
